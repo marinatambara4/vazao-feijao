@@ -130,11 +130,8 @@ def cabecalho(p, com_tipo=True):
     return base, dur
 
 
-def paradas(p, titulo="Minutos parado"):
-    """Minutos + caixinhas de motivo. Retorna (minutos, texto do motivo)."""
-    par = st.number_input(titulo, 0, 600, 0, key=p + "_par")
-    if par == 0:
-        return 0, ""
+def caixas_motivo(p):
+    """Caixinhas de motivo de parada. Retorna o texto combinado."""
     st.caption("Motivo da parada")
     c1, c2 = st.columns(2)
     asp = c1.checkbox("Aspereza do grão", key=p + "_m1")
@@ -150,7 +147,50 @@ def paradas(p, titulo="Minutos parado"):
                                    (hid, "Pane hidráulica")] if ok]
     if outro:
         mots.append(f"Outro: {txt}" if txt else "Outro")
-    return par, " ; ".join(mots)
+    return " ; ".join(mots)
+
+
+def paradas(p, titulo="Minutos parado"):
+    """Minutos + caixinhas de motivo. Retorna (minutos, texto do motivo)."""
+    par = st.number_input(titulo, 0, 600, 0, key=p + "_par")
+    if par == 0:
+        return 0, ""
+    return par, caixas_motivo(p)
+
+
+def bloco_equipamento(nome, key, kg_por_unidade, nominal):
+    """Um equipamento com hora própria: Rodando (contador início/fim) ou Parada (motivo)."""
+    st.markdown(f"**{nome}**")
+    status = st.radio("Status nesse intervalo", ["Rodando", "Parada"], horizontal=True, key=key + "_status")
+    ini = campo_hora("Hora início", key + "_ini")
+    fim = campo_hora("Hora fim", key + "_fim")
+    dur = minutos(ini, fim)
+    if dur <= 0:
+        st.error("A hora fim precisa ser depois da hora início.")
+        return None
+    st.caption(f"Janela: {dur // 60}h{dur % 60:02d} ({dur} min)")
+    comum = dict(hora_ini=ini.strftime("%H:%M"), hora_fim=fim.strftime("%H:%M"), duracao_min=dur)
+    if status == "Rodando":
+        a, b = st.columns(2)
+        ci = a.number_input("Contador início", 0, 100_000_000, 0, key=key + "_ci")
+        cf = b.number_input("Contador fim", 0, 100_000_000, 0, key=key + "_cf")
+        qtd = max(cf - ci, 0)
+        kg = qtd * kg_por_unidade
+        v, pct = "", ""
+        if kg > 0:
+            v = kg / 1000 / (dur / 60)
+            pct = v / nominal * 100
+            c1, c2 = st.columns(2)
+            c1.metric("Vazão", f"{v:.2f} ton/h")
+            c2.metric("% da referência", f"{pct:.0f}%", help=f"Referência: {nominal} ton/h")
+        return {**comum, "parado_min": 0, "kg": round(kg, 1),
+                "vazao_tph": round(v, 3) if kg > 0 else "", "pct_nominal": round(pct, 1) if kg > 0 else "",
+                "motivo": "", "detalhe": f"contagem:{qtd}"}
+    else:
+        motivo = caixas_motivo(key)
+        st.caption(f"Registrado como parada por {dur} min.")
+        return {**comum, "parado_min": dur, "kg": 0, "vazao_tph": "", "pct_nominal": "",
+                "motivo": motivo, "detalhe": "parada"}
 
 
 def resultado(base, kg, dur, parado, nominal, extra):
@@ -181,16 +221,12 @@ def confirmar(rows):
             st.error(f"Não salvou: {e}")
 
 
-# ---------- pré-bene e bene (ciclo: hora do 1º e 2º fechamento, por saída) ----------
-def tela_bags(etapa, chave, nomes, maizena=False, nota=""):
+# ---------- pré-bene e bene (janela de tempo + quantos bags fecharam) ----------
+def tela_bags(etapa, chave, nomes, nominal=None, maizena=False, nota=""):
     st.subheader(etapa)
     if nota:
         st.caption(nota)
-    data = st.date_input("Data", datetime.now(TZ).date(), key=chave + "_data")
-    lote = st.text_input("Lote (opcional)", key=chave + "_lote")
-    c1, c2 = st.columns(2)
-    tipo = c1.selectbox("Tipo de feijão", TIPOS, key=chave + "_tipo")
-    asp = c2.radio("Aspereza", ["Liso", "Áspero"], horizontal=True, key=chave + "_asp")
+    base, dur = cabecalho(chave)
     with st.expander("Peso do bag"):
         peso = st.number_input("Peso do bag (kg)", 100, 2000, 900, 10, key=chave + "_peso")
 
@@ -198,64 +234,62 @@ def tela_bags(etapa, chave, nomes, maizena=False, nota=""):
     if extra_key not in st.session_state:
         st.session_state[extra_key] = []
     c1, c2 = st.columns([3, 1])
-    c1.markdown("**Ciclo de cada saída**")
+    c1.markdown("**Bags por saída, no intervalo acima**")
     if c2.button("+ Adicionar saída", key=chave + "_addbtn", use_container_width=True):
         st.session_state[extra_key].append(f"Saída extra {len(st.session_state[extra_key]) + 1}")
+    st.caption("Pode usar número quebrado para bag incompleto: 1/2 = 0,5 · 2/3 ≈ 0,67 · 3/4 = 0,75")
 
     for idx, nome_extra in enumerate(list(st.session_state[extra_key])):
         c1, c2 = st.columns([4, 1])
-        novo_nome = c1.text_input("Nome da saída extra", nome_extra,
-                                  key=f"{chave}_extranome{idx}")
+        novo_nome = c1.text_input("Nome da saída extra", nome_extra, key=f"{chave}_extranome{idx}")
         st.session_state[extra_key][idx] = novo_nome
         if c2.button("Remover", key=f"{chave}_extrarm{idx}"):
             st.session_state[extra_key].pop(idx)
             st.rerun()
 
-    rows = []
-    for nome in nomes + st.session_state[extra_key]:
-        with st.expander(nome, expanded=(nome == nomes[0])):
-            medir = st.checkbox(f"Medir {nome} agora", key=f"{chave}_{nome}_on",
-                                value=(nome == nomes[0]))
-            if not medir:
-                continue
-            ini = campo_hora("1º fechamento", f"{chave}_{nome}_ini")
-            fim = campo_hora("2º fechamento", f"{chave}_{nome}_fim")
-            dur = minutos(ini, fim)
-            if dur <= 0:
-                st.error("O 2º fechamento precisa ser depois do 1º.")
-                continue
-            st.caption(f"Ciclo: {dur // 60}h{dur % 60:02d} ({dur} min)")
-            v = peso / 1000 / (dur / 60)
-            st.metric(f"Vazão — {nome}", f"{v:.3f} ton/h")
-            extra = {"detalhe": f"{nome}: 1 bag de {peso}kg em {dur} min"}
-            if maizena and nome == nomes[0]:
-                extra["maizena"] = st.radio("Maizena usada? (opcional, se souber)",
-                                            ["Não sei", "Não", "Sim"], horizontal=True,
-                                            key=f"{chave}_{nome}_mz")
-            rows.append({"etapa": f"{etapa} — {nome}", "data": str(data), "lote": lote,
-                        "tipo": tipo, "aspereza": asp, "hora_ini": ini.strftime("%H:%M"),
-                        "hora_fim": fim.strftime("%H:%M"), "duracao_min": dur, "parado_min": 0,
-                        "kg": peso, "vazao_tph": round(v, 3), "pct_nominal": "", **extra})
+    todas_saidas = nomes + st.session_state[extra_key]
+    kgs = {}
+    for nome in todas_saidas:
+        kgs[nome] = st.number_input(nome, 0.0, 1000.0, 0.0, step=0.1, format="%.2f",
+                                    key=f"{chave}_{nome}_bags") * peso
+
     par, mot = paradas(chave)
+    maiz = None
+    if maizena:
+        maiz = st.radio("Maizena usada? (opcional, se souber)", ["Não sei", "Não", "Sim"],
+                        horizontal=True, key=chave + "_mz")
     obs = st.text_area("Observações", key=chave + "_obs")
-    for r in rows:
-        r["motivo"] = mot
-        r["obs"] = obs
-        if par:
-            r["parado_min"] = par
+
+    rows = []
+    for nome in todas_saidas:
+        if kgs[nome] <= 0:
+            continue
+        extra = {"detalhe": f"{nome}: {kgs[nome] / peso:.2f} bag(s) de {peso}kg"}
+        if maiz is not None:
+            extra["maizena"] = maiz
+        r = resultado({**base, "etapa": f"{etapa} — {nome}"}, kgs[nome], dur, par,
+                      nominal if nominal else 1.0, extra)
+        if r:
+            r["motivo"] = mot
+            r["obs"] = obs
+            rows.append(r)
+    if not any(kgs[n] > 0 for n in todas_saidas):
+        st.info("Preencha os bags de ao menos uma saída para ver a vazão.")
     confirmar(rows)
 
 
 # ---------- embaladora + 2 enfardadoras ----------
 def tela_embalagem():
     st.subheader("Embaladora + enfardadoras")
-    base, dur = cabecalho("emb", com_tipo=False)
-    with st.expander("Peso por contagem do contador"):
-        kgc = st.number_input("kg por unidade do contador", 0.1, 100.0, 1.0, 0.1, key="emb_kgc",
+    st.caption("Cada máquina e cada enfardadora tem seu próprio horário. Meça uma de cada vez, "
+               "no tempo que der. Se o status mudar no meio (ligou/desligou), encerre essa medição "
+               "e salve, depois abra uma nova.")
+    data = st.date_input("Data", datetime.now(TZ).date(), key="emb_data")
+    with st.expander("Pesos de referência"):
+        kgc = st.number_input("kg por unidade do contador da máquina", 0.1, 100.0, 1.0, 0.1, key="emb_kgc",
                               help="1 se o contador conta sacos de 1 kg; 30 se conta fardos.")
-        peso_fardo = st.number_input("Peso do fardo (kg), para o contador da enfardadora",
-                                     1, 200, 30, key="emb_pfardo")
-    falta = st.number_input("Esperando feijão (min, geral)", 0, 600, 0, key="emb_falta")
+        peso_fardo = st.number_input("Peso do fardo (kg)", 1, 200, 30, key="emb_pfardo")
+
     rows = []
     for enf, maqs, k in [("Enfardadora 1", (1, 2), "e1"), ("Enfardadora 2", (3, 4), "e2")]:
         st.divider()
@@ -268,52 +302,26 @@ def tela_embalagem():
         silo_ini = c3.radio("No início", SILO_OPCOES, key=f"{k}_silo_i")
         silo_fim = c4.radio("No fim", SILO_OPCOES, key=f"{k}_silo_f")
 
-        with st.expander(f"Contador da {enf.lower()} (fardos)", expanded=True):
-            a, b = st.columns(2)
-            e_ini = a.number_input("Contador início", 0, 100_000_000, 0, key=f"{k}_eci")
-            e_fim = b.number_input("Contador fim", 0, 100_000_000, 0, key=f"{k}_ecf")
-            kg_enf = max(e_fim - e_ini, 0) * peso_fardo
-            if kg_enf > 0 and dur > 0:
-                st.caption(f"{enf}: {kg_enf / 1000 / (dur / 60):.2f} ton/h (janela cheia, sem descontar paradas)")
+        with st.expander(f"{enf} — medição", expanded=True):
+            d_enf = bloco_equipamento(enf, f"{k}_enf", peso_fardo, 3.0)
+        if d_enf:
+            fardos = int(d_enf["detalhe"].split("contagem:")[1]) if "contagem:" in d_enf["detalhe"] else 0
+            paletes = fardos / 35  # 1 palete = 1.050 kg = 35 fardos de 30 kg
+            if fardos > 0:
+                st.caption(f"{fardos} fardos ≈ {paletes:.2f} paletes")
+            rows.append({**d_enf, "etapa": "Embaladora", "tipo": tipo, "aspereza": asp,
+                        "data": str(data), "lote": "", "enfardadora": enf,
+                        "silo_ini": silo_ini, "silo_fim": silo_fim,
+                        "detalhe": d_enf["detalhe"] + f";paletes_calc:{paletes:.2f}"})
 
-        kg, det, par_tot, mots = 0.0, [], 0, []
         for i in maqs:
-            with st.expander(f"Máquina {i}", expanded=True):
-                a, b = st.columns(2)
-                ini = a.number_input("Contador início", 0, 100_000_000, 0, key=f"emb_ci{i}")
-                fim = b.number_input("Contador fim", 0, 100_000_000, 0, key=f"emb_cf{i}")
-                pm, mm = paradas(f"emb_m{i}", "Min parada da máquina")
-                q = max(fim - ini, 0) * kgc
-                kg += q
-                par_tot += pm
-                if q > 0 and dur - pm > 0:
-                    st.caption(f"Máquina {i}: {q / 1000 / ((dur - pm) / 60):.2f} ton/h (rodando {dur - pm} min)")
-                det.append(f"M{i}:{int(q)}kg,par{pm}min")
-                if mm:
-                    mots.append(f"M{i}: {mm}")
-        with st.expander(f"{enf} (parada)", expanded=True):
-            pe, me = paradas(f"emb_{k}_enf", "Min parada da enfardadora")
-            fardos_enf = max(e_fim - e_ini, 0)
-            pal = fardos_enf / 35  # 1 palete = 1.050 kg = 35 fardos de 30 kg
-            if fardos_enf > 0:
-                st.caption(f"{fardos_enf} fardos ≈ {pal:.2f} paletes ({kg_enf / 1000:.2f} t) "
-                          f"| Soma máquinas: {kg / 1000:.2f} t")
-        if me:
-            mots.append(f"Enfardadora: {me}")
-        par_tot += pe
-        # usa o contador da própria enfardadora quando preenchido; senão, soma das máquinas
-        kg_final = kg_enf if kg_enf > 0 else kg
-        r = resultado({**base, "etapa": "Embaladora", "tipo": tipo, "aspereza": asp}, kg_final, dur, 0, 3.0,
-                      {"enfardadora": enf, "silo_ini": silo_ini, "silo_fim": silo_fim,
-                       "motivo": " ; ".join(mots),
-                       "detalhe": "; ".join(det) + f"; fardos_enf:{fardos_enf}; paletes_calc:{pal:.2f}; "
-                                                    f"contador_enf_kg:{kg_enf:.0f}"})
-        if r:
-            r["parado_min"] = par_tot + falta
-            rows.append(r)
-    if falta:
-        for r in rows:
-            r["motivo"] = (r["motivo"] + " ; " if r["motivo"] else "") + "Falta de feijão"
+            with st.expander(f"Máquina {i} — medição"):
+                d_m = bloco_equipamento(f"Máquina {i}", f"m{i}", kgc, 1.5)
+            if d_m:
+                rows.append({**d_m, "etapa": f"Embaladora — Máquina {i}", "tipo": tipo, "aspereza": asp,
+                            "data": str(data), "lote": "", "enfardadora": enf,
+                            "silo_ini": "", "silo_fim": ""})
+
     obs = st.text_area("Observações", key="emb_obs")
     for r in rows:
         r["obs"] = obs
@@ -323,14 +331,14 @@ def tela_embalagem():
 # ---------- gráficos ----------
 def tela_graficos():
     st.subheader("Comparação áspero × liso")
-    df = carregar()
-    if df.empty:
+    df_tudo = carregar()
+    if df_tudo.empty:
         st.info("Ainda não há medições salvas.")
         return
-    df = df.dropna(subset=["vazao_tph"])
-    sel = st.selectbox("Tipo de feijão", ["Todos"] + sorted(df["tipo"].dropna().unique().tolist()))
+    sel = st.selectbox("Tipo de feijão", ["Todos"] + sorted(df_tudo["tipo"].dropna().unique().tolist()))
     if sel != "Todos":
-        df = df[df["tipo"] == sel]
+        df_tudo = df_tudo[df_tudo["tipo"] == sel]
+    df = df_tudo.dropna(subset=["vazao_tph"])  # só medições com vazão calculada
     cores = {"Liso": "#2a9d8f", "Áspero": "#c8553d"}
 
     st.markdown("**1. Vazão real por etapa**")

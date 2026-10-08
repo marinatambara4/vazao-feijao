@@ -10,7 +10,7 @@ import streamlit as st
 st.set_page_config(page_title="Vazão feijão", page_icon="🫘", layout="centered")
 TZ = ZoneInfo("America/Sao_Paulo")
 CSV_LOCAL = Path("medicoes.csv")
-# colunas novas ficam no fim para não bagunçar linhas antigas
+
 COLS = ["etapa", "data", "hora_ini", "hora_fim", "tipo", "aspereza", "lote",
         "duracao_min", "parado_min", "motivo", "kg", "vazao_tph", "pct_nominal",
         "maizena", "detalhe", "obs", "registrado_em", "enfardadora", "silo_ini", "silo_fim",
@@ -63,7 +63,7 @@ def _linha_leitura(row: dict):
 
 @st.cache_resource
 def get_ws_leitura():
-    ws = get_ws()  # garante que a planilha já foi aberta
+    ws = get_ws()
     sh = ws.spreadsheet
     try:
         wl = sh.worksheet("leitura")
@@ -86,11 +86,9 @@ def _append_medicoes(row: dict):
 def _append_leitura(row: dict):
     if usa_sheets():
         get_ws_leitura().append_row(_linha_leitura(row), value_input_option="USER_ENTERED")
-    # sem Sheets, os dados já estão completos no CSV; não há aba de leitura separada
 
 
 def salvar(row: dict):
-    """Salva uma medição já concluída de uma vez (pré-bene e bene continuam usando isso)."""
     row["registrado_em"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     row.setdefault("status_medicao", "Concluída")
     row.setdefault("modo_medicao", "")
@@ -104,7 +102,6 @@ def novo_id(prefixo):
 
 
 def pendentes(key_prefixo):
-    """Medições iniciadas e ainda não encerradas para esse equipamento."""
     df = carregar()
     if df.empty or "id_medicao" not in df.columns:
         return pd.DataFrame()
@@ -114,7 +111,6 @@ def pendentes(key_prefixo):
 
 
 def atualizar_medicao(id_medicao: str, updates: dict):
-    """Encontra a linha pelo id e atualiza só os campos passados. Retorna a linha final ou None."""
     if usa_sheets():
         ws = get_ws()
         try:
@@ -153,7 +149,6 @@ def carregar() -> pd.DataFrame:
             df = pd.DataFrame(columns=COLS)
         else:
             header = list(valores[0])
-            # evita cabeçalho duplicado (sobra de versões antigas)
             vistos, header_unico = {}, []
             for h in header:
                 vistos[h] = vistos.get(h, 0) + 1
@@ -161,7 +156,7 @@ def carregar() -> pd.DataFrame:
             n = len(header_unico)
             linhas = [list(r[:n]) + [""] * (n - len(r)) for r in valores[1:]]
             df = pd.DataFrame(linhas, columns=header_unico)
-            for c in COLS:  # garante que todas as colunas esperadas existam
+            for c in COLS:
                 if c not in df.columns:
                     df[c] = ""
     elif CSV_LOCAL.exists():
@@ -190,26 +185,7 @@ def minutos(ini: time, fim: time) -> int:
     return (fim.hour * 60 + fim.minute) - (ini.hour * 60 + ini.minute)
 
 
-def cabecalho(p, com_tipo=True):
-    data = st.date_input("Data", datetime.now(TZ).date(), key=p + "_data")
-    ini = campo_hora("Hora início", p + "_ini")
-    fim = campo_hora("Hora fim", p + "_fim")
-    dur = minutos(ini, fim)
-    if dur <= 0:
-        st.error("A hora fim precisa ser depois da hora início.")
-    else:
-        st.caption(f"Janela: {dur // 60}h{dur % 60:02d} ({dur} min)")
-    base = dict(data=str(data), hora_ini=ini.strftime("%H:%M"), hora_fim=fim.strftime("%H:%M"),
-                duracao_min=dur, lote=st.text_input("Lote (opcional)", key=p + "_lote"))
-    if com_tipo:
-        c1, c2 = st.columns(2)
-        base["tipo"] = c1.selectbox("Tipo de feijão", TIPOS, key=p + "_tipo")
-        base["aspereza"] = c2.radio("Aspereza", ["Liso", "Áspero"], horizontal=True, key=p + "_asp")
-    return base, dur
-
-
 def caixas_motivo(p):
-    """Caixinhas de motivo de parada. Retorna o texto combinado."""
     st.caption("Motivo da parada")
     c1, c2 = st.columns(2)
     asp = c1.checkbox("Aspereza do grão", key=p + "_m1")
@@ -229,7 +205,6 @@ def caixas_motivo(p):
 
 
 def paradas(p, titulo="Minutos parado"):
-    """Minutos + caixinhas de motivo. Retorna (minutos, texto do motivo)."""
     par = st.number_input(titulo, 0, 600, 0, key=p + "_par")
     if par == 0:
         return 0, ""
@@ -238,10 +213,6 @@ def paradas(p, titulo="Minutos parado"):
 
 def bloco_equipamento(nome, key, kg_por_unidade, nominal, etapa_nome, data, tipo, aspereza, obs,
                       enfardadora="", silo_ini="", silo_fim="", mostrar_paletes=False):
-    """Equipamento com hora própria. Fluxo em 2 passos, cada um salvo na hora:
-    1) 'Iniciar' grava hora/contador início (ou início de parada) direto na planilha.
-    2) Depois, 'Encerrar' completa com hora/contador fim e calcula a vazão.
-    Assim nada se perde se você trocar de aba ou a conexão cair no meio."""
     st.markdown(f"**{nome}**")
     pend = pendentes(key)
 
@@ -339,36 +310,7 @@ def bloco_equipamento(nome, key, kg_por_unidade, nominal, etapa_nome, data, tipo
                 st.error(f"Não consegui salvar o início: {e}")
 
 
-
-def resultado(base, kg, dur, parado, nominal, extra):
-    liq = dur - parado
-    if liq <= 0 or kg <= 0:
-        st.warning("Preencha bags/contadores e horários para ver a vazão.")
-        return None
-    v = kg / 1000 / (liq / 60)
-    pct = v / nominal * 100
-    c1, c2 = st.columns(2)
-    c1.metric("Vazão real", f"{v:.2f} ton/h")
-    c2.metric("% da referência", f"{pct:.0f}%", help=f"Referência: {nominal} ton/h")
-    return {**base, "parado_min": parado, "kg": round(kg, 1), "vazao_tph": round(v, 3),
-            "pct_nominal": round(pct, 1), **extra}
-
-
-def confirmar(rows):
-    rows = [r for r in rows if r]
-    if not rows:
-        return
-    if st.button(f"Salvar medição ({len(rows)} registro{'s' if len(rows) > 1 else ''})",
-                 type="primary", use_container_width=True):
-        try:
-            for r in rows:
-                salvar(r)
-            st.success("Medição salva.")
-        except Exception as e:
-            st.error(f"Não salvou: {e}")
-
-
-# ---------- pré-bene e bene (janela de tempo + quantos bags fecharam) ----------
+# ---------- pré-beneficiamento ----------
 def tela_bags(etapa, chave, nomes, nominal=None, maizena=False, nota=""):
     st.subheader(etapa)
     if nota:
@@ -403,7 +345,6 @@ def tela_bags(etapa, chave, nomes, nominal=None, maizena=False, nota=""):
         c1.markdown("**Bags por saída, no intervalo acima**")
         if c2.button("+ Adicionar saída", key=chave + "_addbtn", use_container_width=True):
             st.session_state[extra_key].append(f"Saída extra {len(st.session_state[extra_key]) + 1}")
-        st.caption("Pode usar número quebrado para bag incompleto: 1/2 = 0,5 · 2/3 ≈ 0,67 · 3/4 = 0,75")
 
         for idx, nome_extra in enumerate(list(st.session_state[extra_key])):
             c1, c2 = st.columns([4, 1])
@@ -443,17 +384,14 @@ def tela_bags(etapa, chave, nomes, nominal=None, maizena=False, nota=""):
                 return d
 
             if not saidas_com_dado:
-                # nada preenchido: só fecha a observação em aberto, sem gerar vazão
                 atualizar_medicao(linha["id_medicao"],
                                   {"status_medicao": "Concluída", "hora_fim": fim.strftime("%H:%M")})
                 st.info("Nenhuma saída tinha bags preenchidos; a observação foi encerrada sem gerar vazão.")
             else:
-                # a 1ª saída atualiza a própria linha do início (sem deixar linha vazia)
                 primeira, *resto = saidas_com_dado
                 full = atualizar_medicao(linha["id_medicao"], monta(primeira))
                 if full:
                     _append_leitura(full)
-                # saídas extras (se houver mais de uma) viram linhas novas, completas
                 for nome in resto:
                     row = {"data": linha.get("data", ""), "hora_ini": linha["hora_ini"],
                           "tipo": linha.get("tipo", ""), "aspereza": linha.get("aspereza", ""),
@@ -484,14 +422,146 @@ def tela_bags(etapa, chave, nomes, nominal=None, maizena=False, nota=""):
             st.error(f"Não consegui salvar o início: {e}")
 
 
+# ---------- beneficiamento via moega ----------
+def tela_beneficiamento_moega():
+    st.subheader("Beneficiamento (Moega)")
+    st.caption("Acompanhamento do beneficiamento feito através da moega. "
+               "Clique em **Iniciar observação** assim que abrir/iniciar a alimentação da moega. "
+               "Ao esvaziar, informe a hora de término, quantidade de bags e pesos para calcular a vazão.")
+
+    chave = "bene"
+    nominal = 8.0  # Referência nominal de vazão (ton/h)
+
+    pend = pendentes(chave)
+    if not pend.empty:
+        linha = pend.sort_values("registrado_em", ascending=False).iloc[0]
+        st.warning(f"Observação em andamento desde {linha['hora_ini']} "
+                   f"({linha.get('tipo', '')}, {linha.get('aspereza', '')}). "
+                   f"Preencha os dados abaixo ao finalizar o lote na moega.")
+        try:
+            ini_time = datetime.strptime(str(linha["hora_ini"]), "%H:%M").time()
+        except Exception:
+            ini_time = time(0, 0)
+        fim = campo_hora("Hora fim (moega vazia)", chave + "_fimresume")
+        dur = minutos(ini_time, fim)
+        if dur <= 0:
+            st.error("A hora fim precisa ser depois do início registrado.")
+            return
+        st.caption(f"Janela de tempo: {dur // 60}h{dur % 60:02d} ({dur} min)")
+
+        st.markdown("---")
+        st.markdown("**Quantidade e Pesagem dos Bags**")
+        qtd_bags = st.number_input("Quantidade de bags na moega", min_value=0.0, max_value=200.0, value=6.0, step=0.5, key=chave + "_qtd_bags")
+
+        modo_peso = st.radio("Como deseja informar o peso?", ["Peso único / médio por bag", "Amostras de pesagens dos bags"], horizontal=True, key=chave + "_modo_peso")
+
+        if modo_peso == "Peso único / médio por bag":
+            peso_medio = st.number_input("Peso por bag (kg)", min_value=100.0, max_value=2000.0, value=900.0, step=10.0, key=chave + "_peso_unico")
+        else:
+            st.caption("Informe o peso dos bags que você pesou individualmente:")
+            num_amostras = st.number_input("Quantos bags foram pesados?", min_value=1, max_value=10, value=2, step=1, key=chave + "_num_amostras")
+            pesos_amostras = []
+            cols_pesos = st.columns(min(int(num_amostras), 4))
+            for i in range(int(num_amostras)):
+                col_idx = i % 4
+                val = cols_pesos[col_idx].number_input(f"Bag {i+1} (kg)", min_value=100.0, max_value=2000.0, value=880.0 if i == 0 else 870.0, step=5.0, key=f"{chave}_p_amostra_{i}")
+                pesos_amostras.append(val)
+            peso_medio = sum(pesos_amostras) / len(pesos_amostras)
+            st.info(f"Média calculada das amostras: **{peso_medio:.1f} kg/bag**")
+
+        kg_total = qtd_bags * peso_medio
+        st.caption(f"Peso total processado na moega: **{kg_total:.1f} kg** ({qtd_bags} bags × {peso_medio:.1f} kg)")
+
+        st.markdown("---")
+        par, mot = paradas(chave)
+        maiz = st.radio("Maizena usada? (opcional)", ["Não sei", "Não", "Sim"], horizontal=True, key=chave + "_mz")
+        obs = st.text_area("Observações", key=chave + "_obs")
+
+        if st.button("Encerrar observação e salvar", key=chave + "_encerrar", type="primary"):
+            liq = dur - par
+            if liq <= 0:
+                st.error("O tempo útil (duração menos paradas) precisa ser maior que zero.")
+                return
+            if kg_total <= 0:
+                st.error("Informe a quantidade de bags e pesos válidos.")
+                return
+
+            vazao_tph = (kg_total / 1000) / (liq / 60)
+            pct_nominal = (vazao_tph / nominal) * 100 if nominal else 0.0
+
+            detalhe_str = f"Moega: {qtd_bags} bag(s) | Peso médio: {peso_medio:.1f} kg/bag"
+
+            dados_update = {
+                "etapa": "Beneficiamento (Moega)",
+                "hora_fim": fim.strftime("%H:%M"),
+                "duracao_min": dur,
+                "parado_min": par,
+                "motivo": mot,
+                "kg": round(kg_total, 1),
+                "vazao_tph": round(vazao_tph, 3),
+                "pct_nominal": round(pct_nominal, 1),
+                "maizena": maiz,
+                "detalhe": detalhe_str,
+                "obs": obs,
+                "status_medicao": "Concluída"
+            }
+
+            full = atualizar_medicao(linha["id_medicao"], dados_update)
+            if full:
+                _append_leitura(full)
+                st.success(f"Beneficiamento registrado! Vazão: **{vazao_tph:.2f} ton/h**.")
+            else:
+                st.error("Erro ao atualizar a medição.")
+            st.rerun()
+        return
+
+    data = st.date_input("Data", datetime.now(TZ).date(), key=chave + "_data")
+    ini = campo_hora("Hora início (abertura/enchimento da moega)", chave + "_ini")
+    c1, c2 = st.columns(2)
+    tipo = c1.selectbox("Tipo de feijão", TIPOS, key=chave + "_tipo")
+    asp = c2.radio("Aspereza", ["Liso", "Áspero"], horizontal=True, key=chave + "_asp")
+    lote = st.text_input("Lote (opcional)", key=chave + "_lote")
+
+    if st.button("Iniciar observação (salva já)", key=chave + "_iniciar", type="primary"):
+        row = {
+            "id_medicao": novo_id(chave),
+            "status_medicao": "Em andamento",
+            "modo_medicao": "",
+            "etapa": "Beneficiamento (Moega)",
+            "data": str(data),
+            "hora_ini": ini.strftime("%H:%M"),
+            "hora_fim": "",
+            "duracao_min": "",
+            "parado_min": "",
+            "kg": "",
+            "vazao_tph": "",
+            "pct_nominal": "",
+            "motivo": "",
+            "detalhe": "Moega",
+            "tipo": tipo,
+            "aspereza": asp,
+            "lote": lote,
+            "maizena": "",
+            "obs": "",
+            "enfardadora": "",
+            "silo_ini": "",
+            "silo_fim": "",
+            "registrado_em": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        }
+        try:
+            _append_medicoes(row)
+            st.success(f"Início salvo às {ini.strftime('%H:%M')}. Volte aqui quando a moega esvaziar para encerrar.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Não consegui salvar o início: {e}")
+
 
 # ---------- embaladora + 2 enfardadoras ----------
 def tela_embalagem():
     st.subheader("Embaladora + enfardadoras")
     st.caption("Cada máquina e cada enfardadora tem seu próprio horário, e cada uma se salva sozinha: "
                "assim que você tiver a leitura inicial, clique em **Iniciar** — isso já fica gravado "
-               "na hora. Quando voltar lá com a leitura final, abra esta tela de novo (ela lembra o "
-               "que ficou pendente) e clique em **Encerrar**.")
+               "na hora. Quando voltar lá com a leitura final, abra esta tela de novo e clique em **Encerrar**.")
     data = st.date_input("Data", datetime.now(TZ).date(), key="emb_data")
     with st.expander("Pesos de referência"):
         kgc = st.number_input("kg por unidade do contador da máquina", 0.1, 100.0, 1.0, 0.1, key="emb_kgc",
@@ -530,7 +600,7 @@ def tela_graficos():
     sel = st.selectbox("Tipo de feijão", ["Todos"] + sorted(df_tudo["tipo"].dropna().unique().tolist()))
     if sel != "Todos":
         df_tudo = df_tudo[df_tudo["tipo"] == sel]
-    df = df_tudo.dropna(subset=["vazao_tph"])  # só medições com vazão calculada
+    df = df_tudo.dropna(subset=["vazao_tph"])
     cores = {"Liso": "#2a9d8f", "Áspero": "#c8553d"}
 
     st.markdown("**1. Vazão real por etapa**")
@@ -600,13 +670,12 @@ st.title("Vazão do feijão")
 if not usa_sheets():
     st.warning("Google Sheets não configurado: salvando em CSV local (medicoes.csv).")
 tela = st.radio("Etapa", ["Pré-bene", "Bene", "Embaladora", "Gráficos"], horizontal=True)
+
 if tela == "Pré-bene":
     tela_bags("Pré-beneficiamento", "pre", ["Feijão tipo 1"], maizena=True,
               nota="É aqui que a maizena costuma ser adicionada.")
 elif tela == "Bene":
-    tela_bags("Beneficiamento", "bene", ["Prata", "Bandinha"], maizena=True,
-              nota="A vazão do feijão principal (que vai direto ao silo) é vista depois, na tela da Embaladora. "
-                   "Deixe marcado se também passa maizena aqui, caso aplicável.")
+    tela_beneficiamento_moega()
 elif tela == "Embaladora":
     tela_embalagem()
 else:
